@@ -516,3 +516,92 @@ for idx, row in hotel_gdf.iterrows():
     ).add_to(marker_cluster)
 
 display(m)
+
+import streamlit as st
+import pandas as pd
+import ast
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import MultiLabelBinarizer
+
+# Load data
+@st.cache_data
+def load_data():
+    df = pd.read_csv('indonesia_hotels.csv')
+    df['list_fasilitas'] = df['list_fasilitas'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+    return df
+
+indonesia_hotels = load_data()
+
+# Mood to fasilitas mapping
+mood_facilities_map = {
+    "Rileks": ['spa', 'kolam renang', 'pemandangan laut', 'taman', 'kamar kedap suara'],
+    "Romantis": ['teras atau balkon', 'lighting hangat', 'bathub', 'tempat tidur king-size'],
+    "Workation": ['wifi gratis', 'meja kerja', 'kursi ergonomis', 'dekat coworking space'],
+    "Petualang": ['mendaki', 'penyewaan mobil', 'guide lokal', 'area hiking'],
+    "Sosial": ['bar/lounge', 'live music', 'event malam', 'aktivitas bersama'],
+    "Healing": ['spa', 'aromatherapy', 'yoga', 'taman', 'suasana tenang'],
+}
+
+def rule_based_filtering(df, mood, budget_min, budget_max, fasilitas_wajib=[]):
+    mood_keywords = mood_facilities_map.get(mood, [])
+
+    def fasilitas_match(fasilitas_list, required_list):
+        fasilitas_list_lower = [f.lower() for f in fasilitas_list]
+        return all(req.lower() in fasilitas_list_lower for req in required_list)
+
+    def fasilitas_mood_match(fasilitas_list, mood_list):
+        fasilitas_list_lower = [f.lower() for f in fasilitas_list]
+        return any(m.lower() in fasilitas_list_lower for m in mood_list)
+
+    filtered = df[
+        df['list_fasilitas'].apply(lambda x: fasilitas_match(x, fasilitas_wajib)) &
+        (df['Min'] >= budget_min) &
+        (df['Max'] <= budget_max) &
+        df['list_fasilitas'].apply(lambda x: fasilitas_mood_match(x, mood_keywords))
+    ].copy()
+
+    return filtered
+
+def content_based_recommendation(df, hotel_name, top_n=5):
+    mlb = MultiLabelBinarizer()
+    fasilitas_encoded = mlb.fit_transform(df['list_fasilitas'].apply(lambda x: [f.lower() for f in x]))
+    fitur_df = pd.DataFrame(fasilitas_encoded, columns=mlb.classes_, index=df.index)
+
+    cosine_sim = cosine_similarity(fitur_df)
+
+    try:
+        idx = df.index[df['Hotel Name'] == hotel_name][0]
+    except IndexError:
+        return pd.DataFrame()
+
+    sim_scores = list(enumerate(cosine_sim[idx]))
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+    sim_scores = [s for s in sim_scores if s[0] != idx]
+
+    top_indices = [i[0] for i in sim_scores[:top_n]]
+    return df.iloc[top_indices]
+
+# UI
+st.title("Sistem Rekomendasi Hotel")
+
+mood = st.selectbox("Pilih Mood Anda:", list(mood_facilities_map.keys()))
+budget_min = st.slider("Budget Minimum (Rp)", 100000, 1000000, 200000, step=50000)
+budget_max = st.slider("Budget Maksimum (Rp)", 100000, 2000000, 1000000, step=50000)
+fasilitas_input = st.text_input("Fasilitas wajib (pisahkan dengan koma):", "wifi, ac")
+
+if st.button("Cari Rekomendasi"):
+    fasilitas_wajib = [f.strip().lower() for f in fasilitas_input.split(",")]
+    filtered = rule_based_filtering(indonesia_hotels, mood, budget_min, budget_max, fasilitas_wajib)
+
+    if not filtered.empty:
+        st.subheader("Hasil Filter Hotel")
+        st.dataframe(filtered[['Hotel Name', 'City', 'Min', 'Max', 'list_fasilitas']].head())
+
+        hotel_favorit = st.selectbox("Pilih hotel favorit untuk rekomendasi mirip:", filtered['Hotel Name'].tolist())
+        rekomendasi = content_based_recommendation(filtered, hotel_favorit)
+
+        if not rekomendasi.empty:
+            st.subheader("Rekomendasi Hotel Mirip")
+            st.dataframe(rekomendasi[['Hotel Name', 'City', 'Min', 'Max', 'list_fasilitas']])
+    else:
+        st.warning("Tidak ada hotel yang cocok dengan kriteria.")
